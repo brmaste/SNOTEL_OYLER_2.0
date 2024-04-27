@@ -1,0 +1,606 @@
+---
+title: "Re_analysis"
+author: "Brian"
+date: "2024-04-27"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+editor_options: 
+  chunk_output_type: console
+---
+
+
+# Revisit objectives 
+
+Has the ITV changed at high elevation across two study watersheds in Colorado, and if so, how?
+1) Determine the temperature bias correction for individual SNOTEL stations within the study sites. 
+2) Compute ITV after removing seasonal and long-term climate change-induced trends. 
+3) Examine the elevational, seasonal, and spatial distribution of ITV across the two study watersheds. 
+
+There are three bias correction methods to address the first objective: the National Oceanic and Atmospheric Administration (NOAA) 9th order polynomial correction (or “NOAA9”) recommended by the Snow Survey (Atwood et al., 2023), the 4th order polynomial correction based on the co-located new and old sensor sites in Idaho (referred to as the “Morrisey” method) (Ma et al., 2019), and the Oyler et al., (2015) dataset.
+
+Start new document 
+
+## 1) NOAA9 -> NOAA4? 
+NOAA6 is better and not as unrealistically complicated as NOAA9 
+
+## 2) COOP Stations GHCN 
+
+a) Trend differences? Statistically different? Among the GHCN and adjacent non-GHCN station 
+
+b) Examine station metadata – how often and much (?) did they move 
+
+c) “write everything down, these are our options, what we want to do, what we don’t” 
+
+## 3) Seasons at SNOTEL 
+
+a) Accumulation (start of accumulation to peak), melt (peak to SAG), snow free (SAG to start of accumulation) 
+
+b) Fix the period, or average start of accumulation/melt/SAG? 
+
+i) Are these the same dates for all stations, or the same for each station 
+
+## 4) ITV removing the annual average vs removing annual seasonal average? 
+
+## 5) Analysis using Tmax/Tmin? 
+
+a) In theory this should be easy if the code is set up? 
+
+Yes, the only reason we didn't originally try it was due to many SNOTEL minimums being -51°C, which was erroneous. 
+
+## 6) Interpolation? 
+“Is it better than what Oyler did? Low elevation stations don’t represent higher elevation stations.” Need to discuss what we don’t do. 
+
+We need to at least discuss this. 
+
+## 7) Compare climate normal ITV against only post-sensor change ITV for SNOTEL 
+
+As Tmax, Tmin, with code in hand, this should be easy 
+
+## 8) Download Oyler data for Crosho & Ripple Creek 
+
+_______________________________________________________________________________________
+
+Working again with Crosho:
+
+
+```{r libraries, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(snotelr)
+library(riem)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(dataRetrieval)
+library(lubridate)
+library(sf)
+library(ggthemes)
+library(xts)
+library(dygraphs)
+library(scales)
+library(openair)
+library(plotly)
+library(SciViews)
+knitr::opts_chunk$set(message = F, 
+                      warning = F,
+                      cache = T)
+knitr::opts_chunk$set(echo = TRUE)
+library(trend)
+library(nhdplusTools)
+library(ggpubr)
+library(kableExtra)
+library(forcats)
+library(stringr)
+library(trend)
+```
+
+### Crosho SNOTEL
+
+```{read in Crosho SNOTELr,eval=FALSE, include=TRUE}
+SNOTEL_426 <- snotel_download(site_id = 426, path = tempdir('../data'), internal = TRUE)
+write.csv(SNOTEL_426,"C:/Users/steen/OneDrive/Documents/R/Projects/zombie_code/data_raw/snotel_426.csv", row.names = FALSE) #write in the raw data
+```
+
+
+```{r Crosho read in, echo=TRUE}
+snotel_426 <- read.csv("C:/Users/steen/OneDrive/Documents/R/Projects/zombie_code/data_raw/snotel_426.csv", header = TRUE)
+```
+
+### Crosho	426 
+*Morrisey* 7/21/2005
+
+```{r 426 clean & water year & day }
+#str(snotel_426) # check the date, usually a character.  
+
+snotel_426$Date <- as.Date(snotel_426$date) #change date from character to date format, capitalize to work with Water year functon from NWIS.
+
+#THIS WILL CHANGE FOR EACH STATION
+snotel_426_clean <- snotel_426 %>% # filter for the timeframe
+  filter(Date >= "1979-10-01" & Date <= "2022-09-30") %>%
+  #filter(temperature_mean >= -30 & temperature_mean <= 20) %>% # removing outliers   
+  addWaterYear() %>% 
+  mutate(daymonth = format(as.Date(Date), "%d-%m")) %>% 
+  na.omit()
+
+#adding water day using difftime (SUPER COOL. example from [this](https://stackoverflow.com/questions/48123049/create-day-index-based-on-water-year))
+
+snotel_426_clean <- snotel_426_clean %>% 
+  group_by(waterYear)%>% 
+  mutate(waterDay = (as.integer(difftime(Date, ymd(paste0(waterYear - 1 ,'-09-30')), units = "days"))))
+
+```
+
+
+```{r 426 plot check }
+
+# Check for outliers
+
+ggplot(snotel_426_clean, aes(x = Date, y = temperature_mean)) +
+  geom_point(alpha =0.3) + #lwd = 2) +
+  theme_few() +
+  geom_smooth(method = "lm", se=FALSE) +
+  ylab('Daily temperature (°C)') + 
+  xlab('Date')
+
+# # For SF average annual temp
+# sf <- snotel_426_clean %>% 
+#   group_by(waterYear) %>% 
+#   mutate(anntemp = mean(temperature_mean)) %>% 
+#   distinct(anntemp)
+# 
+# ggplot(sf, aes(x=waterYear, y= anntemp))+
+#   geom_point()+
+#   geom_smooth(method = "lm", se=TRUE)+
+#   theme_few()
+
+```
+
+**Raw SNOTEL 426 average temperatures for water years 1986-2021**
+
+```{r defense 1, include=FALSE}
+
+# Convert the date to the correct format if it's not already in Date format
+specific_date <- as.Date("2005-07-21")
+
+method1 <- ggplot(snotel_426_clean, aes(x = Date, y = temperature_mean)) +
+  geom_point(color = "grey30", alpha = 0.2) +
+  geom_smooth(method = "lm", se = FALSE, color = "blue", linetype = "dashed", size = 2) +  # Customize the smooth line 
+  geom_vline(xintercept = as.numeric(specific_date), linetype = 4, size = 1) +  # Convert date to numeric for xintercept
+  theme_few() +  # Change to a different theme for a cleaner look
+  labs(y = 'Mean Temperature (°C)', x = 'Date') +  # Improve axis labels
+  theme(axis.text = element_text(size = 10), axis.title = element_text(size = 12)) +  # Adjust font sizes
+  theme(plot.title = element_text(hjust = 0.5)) +  # Center the plot title
+  #scale_x_date(date_labels = "%Y-%m-%d")  # Specify date format for x-axis
+  theme(axis.text = element_text(size = 10), axis.title = element_text(size = 12), 
+        axis.title.y = element_text(size = 14), axis.title.x = element_text(size = 14))
+
+print(method1)
+
+#ggsave("method1.jpg", method1, width = 10, height = 8, dpi = 300)
+
+```
+
+```{r 426 clean outliers}
+
+snotel_426_clean <- snotel_426_clean %>% 
+  mutate(temp_diff = abs(temperature_min - temperature_max)) %>% 
+  filter(temperature_mean > -50) %>% 
+  filter(temp_diff < 40)
+
+```
+
+```{r 426 temp difference}
+
+ggplot(snotel_426_clean, aes(x = Date, y = temp_diff)) + 
+  geom_point() + #lwd = 2) +
+  theme_few() +
+  #geom_smooth(method = "lm", se=FALSE) +
+  ylab('Daily temperature difference (°C)') + 
+  xlab('Date')
+
+```
+
+
+**Maximum minus minimum SNOTEL 426 temperatures for water years 1986-2021**
+
+```{r defense 2, eval=FALSE, include=FALSE}
+
+
+method2 <- ggplot(snotel_426_clean, aes(x = Date, y = temp_diff)) +
+  geom_point(color = "grey30", alpha = 0.2) +
+  #geom_smooth(method = "lm", se = FALSE, color = "blue", linetype = "dashed", size = 2) +  # Customize the smooth line 
+  geom_vline(xintercept = as.numeric(specific_date), linetype = 4, size = 1) +  # Convert date to numeric for xintercept
+  theme_few() +  # Change to a different theme for a cleaner look
+  labs(y = 'Daily Temperature Difference (°C)', x = 'Date') +  # Improve axis labels
+  theme(axis.text = element_text(size = 10), axis.title = element_text(size = 12)) +  # Adjust font sizes
+  theme(plot.title = element_text(hjust = 0.5)) +  # Center the plot title
+  #scale_x_date(date_labels = "%Y-%m-%d")  # Specify date format for x-axis+
+  theme(axis.text = element_text(size = 10), axis.title = element_text(size = 12), 
+        axis.title.y = element_text(size = 14), axis.title.x = element_text(size = 14))
+
+print(method2)
+
+#ggsave("method2.jpg", method2, width = 10, height = 8, dpi = 300)
+
+```
+
+```{r 426 cull selection}
+
+# filtering for too few observations in a year
+snotel_426_cull_count_days <- snotel_426_clean %>% 
+  group_by(waterYear) %>% 
+  count(waterYear) %>% 
+  filter(n < 350)
+
+snotel_426_cull_count_days
+
+```
+
+```{r 426 cull}
+
+snotel_426_clean_culled <- snotel_426_clean %>% 
+  filter(waterYear != "1988" & waterYear != "1989" & waterYear != "2009")
+
+# ggplot(snotel_426_clean_culled, aes(x = Date, y = temp_diff)) + 
+#   geom_point() + #lwd = 2) +
+#   theme_few() +
+#   ylab('Daily temperature varience (°C)') + 
+#   xlab('Date')
+
+```
+
+```{r 426 culled plot}
+
+ggplot(snotel_426_clean_culled, aes(x = Date, y = temperature_mean)) + 
+  geom_point() + #lwd = 2) +
+  theme_few() +
+  geom_smooth(method = "lm", se=FALSE) +
+  ylab('Daily temperature (°C)') + 
+  xlab('Date')
+
+
+temp_426_xts <- xts(snotel_426_clean_culled$temperature_mean, order.by = snotel_426_clean_culled$Date)
+
+dygraph(temp_426_xts) %>%
+  dyAxis("y", label = "Daily mean temperature (°C)") 
+```
+
+
+**Cleaned SNOTEL 426 average temperatures for water years 1986-2021**
+
+Looking at minimum and maximum values
+
+```{r 426 min dygraph}
+# filtering for too few observations in a year
+min_temp_426_xts <- xts(snotel_426_clean_culled$temperature_min, order.by = snotel_426_clean_culled$Date)
+
+dygraph(min_temp_426_xts) %>%
+  dyAxis("y", label = "Daily min temperature (°C)") 
+
+```
+
+
+**SNOTEL 426 minimum temperatures for water years 1986-2021**
+
+```{r 426 max dygraph}
+max_temp_426_xts <- xts(snotel_426_clean_culled$temperature_max, order.by = snotel_426_clean_culled$Date)
+
+
+dygraph(max_temp_426_xts) %>%
+  dyAxis("y", label = "Daily max temperature (°C)") 
+
+
+snotel_426_clean_culled <- snotel_426_clean_culled %>% 
+  mutate(temp_difference = (temperature_max-temperature_min))# %>% 
+  #filter(temperature_mean > -50) %>% 
+  #filter(temp_diff < 40)
+```
+
+**SNOTEL 426 maximum temperatures for water years 1986-2021**
+
+```{r 426 difference dygraph}
+difference_temp_426_xts <- xts(snotel_426_clean_culled$temp_difference, order.by = snotel_426_clean_culled$Date)
+
+dygraph(difference_temp_426_xts) %>%
+  dyAxis("y", label = "Temperature difference (max-min) (°C)") 
+
+
+```
+
+**SNOTEL 426 temperature difference (max-min) for water years 1986-2021**
+
+
+```{r 426 min and max original}
+
+# ggplot(snotel_426_clean_culled, aes(x = Date)) + 
+#   geom_point(aes(y = temperature_min, color = "min"), size =0.7, alpha =0.2)+
+#   geom_point(aes(y = temperature_max, color = "max"), size =0.7, alpha =0.2)+
+#   geom_vline(xintercept = specific_date, linetype=4, size=0.7)+
+#   theme_few() +
+#   geom_smooth(aes(x=Date, y = temperature_min, color = "min"), method=lm, se=FALSE)+
+#   geom_smooth(aes(x=Date, y = temperature_max, color = "max"), method=lm, se=FALSE)+
+#   scale_colour_manual(name = "daily temps", values=c("min"="blue", "max" = "red"))+
+#     ylab('Temperature (°C)') + 
+#   xlab('Date')
+
+#Basic:
+# ggplot(snotel_426_clean_culled, aes(x = Date)) + 
+#   geom_point(aes(y = temperature_min, color = "min"), size =0.7, alpha =0.2)+
+#   geom_point(aes(y = temperature_max, color = "max"), size =0.7, alpha =0.2)+
+#   geom_vline(xintercept = specific_date, linetype=4, size=0.7)+
+#   theme_few() +
+#   geom_smooth(aes(x=Date, y = temperature_min, color = "min"), method=lm, se=FALSE)+
+#   geom_smooth(aes(x=Date, y = temperature_max, color = "max"), method=lm, se=FALSE)+
+#   scale_colour_manual(name = "daily temps", values=c("min"="blue", "max" = "red"))+
+#     ylab('Temperature (°C)') + 
+#   xlab('Date')
+
+
+before_subset <- filter(snotel_426_clean_culled, Date <"2005-07-21")
+after_subset  <- filter(snotel_426_clean_culled, Date >= "2005-07-21")
+
+ggplot() +
+  geom_point(data = before_subset, aes(x = Date, y = temperature_min, color = "min"), size =0.7, alpha =0.2) +
+  geom_smooth(data = before_subset, aes(x = Date, y = temperature_min), method = "lm", se = FALSE, color = "blue") +
+  # Plot the second subset with another trendline
+  geom_point(data = after_subset, aes(x = Date, y = temperature_min, color = "min"), size =0.7, alpha =0.2) +
+  geom_smooth(data = after_subset, aes(x = Date, y = temperature_min), method = "lm", se = FALSE, color = "blue")+
+  geom_point(data = before_subset, aes(x = Date, y = temperature_max, color = "max"), size =0.7, alpha =0.2) +
+  geom_smooth(data = before_subset, aes(x = Date, y = temperature_max), method = "lm", se = FALSE, color = "red") +
+  # Plot the second subset with another trendline
+  geom_point(data = after_subset, aes(x = Date, y = temperature_max, color = "max"), size =0.7, alpha =0.2) +
+  geom_smooth(data = after_subset, aes(x = Date, y = temperature_max), method = "lm", se = FALSE, color = "red")+
+  geom_vline(xintercept = specific_date, linetype=4, size=0.7)+
+  theme_few() +
+  scale_colour_manual(name = "daily temps", values=c("min"="blue", "max" = "red"))+
+  ylab('Temperature (°C)') + 
+  xlab('Date')
+
+```
+
+**Daily SNOTEL 426 minimum and maximum temperatures for water years 1986-2021**
+
+
+Crosho	426 *Morrisey* 7/21/2005
+
+Need four datasets:
+
+1) NRCS pre-sensor change data (not adjusted) *"temperature_mean"*
+2) NRCS pre-sensor change adjusted data (Morrisey) *"morrisey"* 
+4) NRCS post-sensor change adjusted data (NOAA9/CONUS) *"noaa_conus"*
+5) NRCE pre & post sensor change adjusted data (NOAA9/CONUS over Morrisey) *"noaa_morrisey"*
+
+
+```{r 426 adj}
+# 2) NRCS pre-sensor change adjusted data (Morrisey) *"morrisey"* 
+
+snotel_426_adjusted <- snotel_426_clean_culled %>%
+  mutate(morrisey = if_else(Date < "2005-07-21", ((5.3*10^(-7))*(temperature_mean^(4))+(3.72*10^(-5))*(temperature_mean^(3))-(2.16*10^(-3))*(temperature_mean^(2))-(7.32*10^(-2))*(temperature_mean)+1.37)+temperature_mean, temperature_mean)) %>% 
+  mutate(noaa_conus = if_else(Date >= "2005-07-21", 610558.226380138*(((temperature_mean+65.929))/194.45)^9-2056177.65461394*(((temperature_mean+65.929))/194.45)^8+2937046.42906361*(((temperature_mean+65.929))/194.45)^7-2319657.12916417*(((temperature_mean+65.929))/194.45)^6+1111854.33825836*(((temperature_mean+65.929))/194.45)^5-337069.883250001*(((temperature_mean+65.929))/194.45)^4+66105.7015922199*(((temperature_mean+65.929))/194.45)^3- 8386.78320604513*(((temperature_mean+65.929))/194.45)^2+ 824.818021779729*(((temperature_mean+65.929))/194.45)-86.7321006757439, temperature_mean)) %>% 
+  mutate(noaa_morrisey = 610558.226380138*(((morrisey+65.929))/194.45)^9-2056177.65461394*(((morrisey+65.929))/194.45)^8+2937046.42906361*(((morrisey+65.929))/194.45)^7-2319657.12916417*(((morrisey+65.929))/194.45)^6+1111854.33825836*(((morrisey+65.929))/194.45)^5-337069.883250001*(((morrisey+65.929))/194.45)^4+66105.7015922199*(((morrisey+65.929))/194.45)^3- 8386.78320604513*(((morrisey+65.929))/194.45)^2+ 824.818021779729*(((morrisey+65.929))/194.45)-86.7321006757439)
+
+#Adding min-max
+
+snotel_426_adjusted <- snotel_426_adjusted %>%
+  mutate(min_morrisey = if_else(Date < "2005-07-21", ((5.3*10^(-7))*(temperature_min^(4))+(3.72*10^(-5))*(temperature_min^(3))-(2.16*10^(-3))*(temperature_min^(2))-(7.32*10^(-2))*(temperature_min)+1.37)+temperature_min, temperature_min)) %>% 
+  mutate(noaa_conus = if_else(Date >= "2005-07-21", 610558.226380138*(((temperature_min+65.929))/194.45)^9-2056177.65461394*(((temperature_min+65.929))/194.45)^8+2937046.42906361*(((temperature_min+65.929))/194.45)^7-2319657.12916417*(((temperature_min+65.929))/194.45)^6+1111854.33825836*(((temperature_min+65.929))/194.45)^5-337069.883250001*(((temperature_min+65.929))/194.45)^4+66105.7015922199*(((temperature_min+65.929))/194.45)^3- 8386.78320604513*(((temperature_min+65.929))/194.45)^2+ 824.818021779729*(((temperature_min+65.929))/194.45)-86.7321006757439, temperature_min)) %>% 
+  mutate(noaa_min_morrisey = 610558.226380138*(((min_morrisey+65.929))/194.45)^9-2056177.65461394*(((min_morrisey+65.929))/194.45)^8+2937046.42906361*(((min_morrisey+65.929))/194.45)^7-2319657.12916417*(((min_morrisey+65.929))/194.45)^6+1111854.33825836*(((min_morrisey+65.929))/194.45)^5-337069.883250001*(((min_morrisey+65.929))/194.45)^4+66105.7015922199*(((min_morrisey+65.929))/194.45)^3- 8386.78320604513*(((min_morrisey+65.929))/194.45)^2+ 824.818021779729*(((min_morrisey+65.929))/194.45)-86.7321006757439)
+
+#max
+
+snotel_426_adjusted <- snotel_426_adjusted %>%
+  mutate(max_morrisey = if_else(Date < "2005-07-21", ((5.3*10^(-7))*(temperature_max^(4))+(3.72*10^(-5))*(temperature_max^(3))-(2.16*10^(-3))*(temperature_max^(2))-(7.32*10^(-2))*(temperature_max)+1.37)+temperature_max, temperature_max)) %>% 
+  mutate(noaa_conus = if_else(Date >= "2005-07-21", 610558.226380138*(((temperature_max+65.929))/194.45)^9-2056177.65461394*(((temperature_max+65.929))/194.45)^8+2937046.42906361*(((temperature_max+65.929))/194.45)^7-2319657.12916417*(((temperature_max+65.929))/194.45)^6+1111854.33825836*(((temperature_max+65.929))/194.45)^5-337069.883250001*(((temperature_max+65.929))/194.45)^4+66105.7015922199*(((temperature_max+65.929))/194.45)^3- 8386.78320604513*(((temperature_max+65.929))/194.45)^2+ 824.818021779729*(((temperature_max+65.929))/194.45)-86.7321006757439, temperature_max)) %>% 
+  mutate(noaa_max_morrisey = 610558.226380138*(((max_morrisey+65.929))/194.45)^9-2056177.65461394*(((max_morrisey+65.929))/194.45)^8+2937046.42906361*(((max_morrisey+65.929))/194.45)^7-2319657.12916417*(((max_morrisey+65.929))/194.45)^6+1111854.33825836*(((max_morrisey+65.929))/194.45)^5-337069.883250001*(((max_morrisey+65.929))/194.45)^4+66105.7015922199*(((max_morrisey+65.929))/194.45)^3- 8386.78320604513*(((max_morrisey+65.929))/194.45)^2+ 824.818021779729*(((max_morrisey+65.929))/194.45)-86.7321006757439)
+
+
+```
+
+```{r 426 min and max Adjusted NOAA9 Morrisey}
+
+# ggplot(snotel_426_adjusted, aes(x = Date)) + 
+#   geom_point(aes(y = temperature_min, color = "min"), size =0.7, alpha =0.2)+
+#   geom_point(aes(y = temperature_max, color = "max"), size =0.7, alpha =0.2)+
+#   geom_vline(xintercept = specific_date, linetype=4, size=0.7)+
+#   theme_few() +
+#   geom_smooth(aes(x=Date, y = temperature_min, color = "min"), method=lm, se=FALSE)+
+#   geom_smooth(aes(x=Date, y = temperature_max, color = "max"), method=lm, se=FALSE)+
+#   scale_colour_manual(name = "daily temps", values=c("min"="blue", "max" = "red"))+
+#     ylab('Temperature (°C)') + 
+#   xlab('Date')
+
+adj_before_subset <- filter(snotel_426_adjusted, Date <"2005-07-21")
+adj_after_subset  <- filter(snotel_426_adjusted, Date >= "2005-07-21")
+
+ggplot() +
+  geom_point(data = adj_before_subset, aes(x = Date, y = noaa_min_morrisey, color = "min"), size =0.7, alpha =0.2) +
+  geom_smooth(data = adj_before_subset, aes(x = Date, y = noaa_min_morrisey), method = "lm", se = FALSE, color = "blue") +
+  # Plot the second subset with another trendline
+  geom_point(data = adj_after_subset, aes(x = Date, y = noaa_min_morrisey, color = "min"), size =0.7, alpha =0.2) +
+  geom_smooth(data = adj_after_subset, aes(x = Date, y = noaa_min_morrisey), method = "lm", se = FALSE, color = "blue")+
+  geom_point(data = adj_before_subset, aes(x = Date, y = noaa_max_morrisey, color = "max"), size =0.7, alpha =0.2) +
+  geom_smooth(data = adj_before_subset, aes(x = Date, y = noaa_max_morrisey), method = "lm", se = FALSE, color = "red") +
+  # Plot the second subset with another trendline
+  geom_point(data = adj_after_subset, aes(x = Date, y = noaa_max_morrisey, color = "max"), size =0.7, alpha =0.2) +
+  geom_smooth(data = adj_after_subset, aes(x = Date, y = noaa_max_morrisey), method = "lm", se = FALSE, color = "red")+
+  geom_vline(xintercept = specific_date, linetype=4, size=0.7)+
+  theme_few() +
+  scale_colour_manual(name = "daily temps", values=c("min"="blue", "max" = "red"))+
+  ylab('Temperature (°C)') + 
+  xlab('Date')
+
+```
+
+**NOAA9 over Morrisey corrected SNOTEL 426 minimum and maximum temperatures for water years 1986-2021** 
+
+426 temperature_mean mean SD and median SD NON-CORRECTED.
+
+```{r 426 SD}
+
+#average water year temperature
+yearly_wy_aver_426 <- snotel_426_adjusted %>% 
+  group_by(waterYear) %>% 
+  mutate(aver_ann_temp = mean(temperature_mean))
+#Average temperature by day for all water years:
+daily_wy_aver_426 <- yearly_wy_aver_426 %>% 
+  group_by(daymonth) %>% 
+  mutate(aver_day_temp = mean(temperature_mean))
+#average mean temperature by day for the period of record:
+daily_wy_aver_426 <- daily_wy_aver_426 %>% 
+  group_by(daymonth) %>% 
+  mutate(all_ave_temp = mean(daily_wy_aver_426$aver_day_temp))
+# try to show all years as means. 
+daily_wy_aver2_426 <-daily_wy_aver_426 %>% 
+  group_by(waterDay) %>%
+  mutate(date_temp = mean(temperature_mean))
+  
+daily_wy_aver2_426$date_temp <- (daily_wy_aver2_426$date_temp) #reduce the sig figs
+# ggplot(daily_wy_aver2_426, aes(x = waterDay, y = date_temp))+
+#   geom_line(size= 0.7) +
+#   theme_few() +
+#   ylab('Average Daily temperature (°C)') + 
+#   xlab('Day of water year')
+
+# mean SD
+
+standard_dev_426 <- daily_wy_aver_426 %>% 
+  group_by(waterYear) %>% 
+  mutate(residual = (all_ave_temp-aver_ann_temp)+temperature_mean-aver_day_temp) %>% 
+  mutate(deviation = abs(residual-lag(residual)))
+standard_dev_all_426 <- standard_dev_426 %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+standard_dev_all_426 <- standard_dev_all_426 %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_mean = mean(residual)) %>%
+  mutate(sd_1 = residual-resid_mean) %>% 
+  mutate(sd_2 = (((sum((sd_1)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2)
+standard_dev_all_426 %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+
+# adding median SD
+standard_dev_all_426_med <- standard_dev_426 %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+standard_dev_all_426_med <- standard_dev_all_426_med %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_median = median(residual)) %>%
+  mutate(sd_1_med = residual-resid_median) %>% 
+  mutate(sd_2_med = (((sum((sd_1_med)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2_med, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2_med)
+standard_dev_all_426_med %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+
+standard_dev_all_426 <- standard_dev_all_426 %>% 
+  left_join(standard_dev_all_426_med, by= 'waterYear')
+
+ggplot(standard_dev_all_426, aes(x = waterYear))+
+  geom_point(aes(y = sd_2, color = 'average'), size =2, alpha =0.4)+
+  geom_smooth(aes(y = sd_2, color = 'average'), method = lm, se= FALSE)+
+  geom_point(aes(y = sd_2_med, color = 'median'), size =2, alpha =0.4)+
+  geom_smooth(aes(y = sd_2_med, color = 'median'), method = lm, se= FALSE)+
+  theme_few() +
+  #geom_smooth(method = "lm", se=FALSE) +
+  ylab('SD') + 
+  xlab('Water year')
+```
+
+**Mean and median standard deviation of SNOTEL 426 average temperatures for water years 1986-2021** 
+
+426 temperature_mean mean SD and median SD noaa_morrisey CORRECTED.
+
+```{r 426 detrend noaa_morrisey adjusted}
+#using the clean culled df:
+#average water year temperature
+yearly_wy_aver_426_noaa_morrisey <- snotel_426_adjusted %>% 
+  group_by(waterYear) %>% 
+  mutate(aver_ann_temp_noaa_morrisey = mean(noaa_morrisey))
+#Average temperature by day for all water years:
+daily_wy_aver_426_noaa_morrisey <- yearly_wy_aver_426_noaa_morrisey %>% 
+  group_by(daymonth) %>% 
+  mutate(aver_day_temp_noaa_morrisey = mean(noaa_morrisey))
+#average mean temperature by day for the period of record:
+daily_wy_aver_426_noaa_morrisey <- daily_wy_aver_426_noaa_morrisey %>% 
+  group_by(daymonth) %>% 
+  mutate(all_ave_temp_noaa_morrisey = mean(daily_wy_aver_426_noaa_morrisey$aver_day_temp_noaa_morrisey))
+# try to show all years as means. 
+daily_wy_aver2_426_noaa_morrisey <-daily_wy_aver_426_noaa_morrisey %>% 
+  group_by(waterDay) %>%
+  mutate(date_temp_noaa_morrisey = mean(noaa_morrisey))
+  
+daily_wy_aver2_426_noaa_morrisey$date_temp_noaa_morrisey <- signif(daily_wy_aver2_426_noaa_morrisey$date_temp_noaa_morrisey,3) #reduce the sig figs
+# ggplot(daily_wy_aver2_426_noaa_morrisey, aes(x = waterDay, y = date_temp_noaa_morrisey))+
+#   geom_line(size= 0.7) +
+#   theme_few() +
+#   ylab('Average Daily temperature (°C)') + 
+#   xlab('Day of water year')
+
+standard_dev_426_noaa_morrisey <- daily_wy_aver_426_noaa_morrisey %>% 
+  group_by(waterYear) %>% 
+  #filter(waterYear >= 1987 & waterYear <= 2021) %>% 
+  mutate(residual = (all_ave_temp_noaa_morrisey-aver_ann_temp_noaa_morrisey)+noaa_morrisey-aver_day_temp_noaa_morrisey) %>% 
+  mutate(deviation = abs(residual-lag(residual)))
+standard_dev_all_426_noaa_morrisey <- standard_dev_426_noaa_morrisey %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+standard_dev_all_426_noaa_morrisey <- standard_dev_all_426_noaa_morrisey %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_mean = mean(residual)) %>%
+  mutate(sd_1 = residual-resid_mean) %>% 
+  mutate(sd_2 = (((sum((sd_1)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2)
+standard_dev_all_426_noaa_morrisey %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+# ggplot(standard_dev_all_426_noaa_morrisey, aes(x = waterYear, y = sd_2))+
+#   geom_line(size= 0.7) +
+#   theme_few() +
+#   geom_smooth(method = "lm", se=FALSE) +
+#   ylab('SD') + 
+#   xlab('Water year')
+
+# adding median SD
+standard_dev_all_426_med_noaa_morrisey <- standard_dev_426_noaa_morrisey %>% 
+  group_by(waterYear) %>% 
+  mutate(nmbr = n())
+standard_dev_all_426_med_noaa_morrisey <- standard_dev_all_426_med_noaa_morrisey %>% 
+  group_by(waterYear) %>% 
+  mutate(resid_median = median(residual)) %>%
+  mutate(sd_1_med = residual-resid_median) %>% 
+  mutate(sd_2_med = (((sum((sd_1_med)^2))/((nmbr-1))))^(0.5)) %>%
+  distinct(sd_2_med, .keep_all = TRUE) %>% 
+   select(waterYear, sd_2_med)
+standard_dev_all_426_med_noaa_morrisey %>% 
+  kable(.,'html') %>%
+  kable_styling() %>%
+  scroll_box(width='250px',height='500px')
+
+standard_dev_all_426_noaa_morrisey <- standard_dev_all_426_noaa_morrisey %>% 
+  left_join(standard_dev_all_426_med_noaa_morrisey, by= 'waterYear')
+
+ggplot(standard_dev_all_426_noaa_morrisey, aes(x = waterYear))+
+  geom_point(aes(y = sd_2, color = 'average'), size =2, alpha =0.4)+
+  geom_smooth(aes(y = sd_2, color = 'average'), method = lm, se= FALSE)+
+  geom_point(aes(y = sd_2_med, color = 'median'), size =2, alpha =0.4)+
+  geom_smooth(aes(y = sd_2_med, color = 'median'), method = lm, se= FALSE)+
+  theme_few() +
+  #geom_smooth(method = "lm", se=FALSE) +
+  ylab('SD') + 
+  xlab('Water year')
+
+```
+
+**NOAA9 over Morrisey corrected mean and median standard deviation of SNOTEL 426 average temperatures for water years 1986-2021** 
+
+
+
